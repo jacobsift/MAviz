@@ -186,7 +186,7 @@ def generate_plots(df_filtered, selected_metric, color_map, num_selected_mimics)
                         )
                 fig_box.update_yaxes(
                     categoryorder='array', categoryarray=hla_order,
-                    tickfont=dict(size=10), showgrid=False,
+                    tickfont=dict(size=18), showgrid=False,
                 )
                 fig_box.update_xaxes(title_text=selected_metric)
                 fig_box.update_layout(margin=dict(l=150, t=50, b=50, r=30))

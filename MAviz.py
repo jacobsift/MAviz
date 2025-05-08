@@ -15,20 +15,16 @@ CANCER_AFF_COL = 'cancer_Aff(nM)'
 MIMIC_EL_COL = 'mimic_%Rank_EL'
 CANCER_EL_COL = 'cancer_%Rank_EL'
 
-# *** NEW: Define HLA Categories ***
+# Define HLA Categories
 CRITICAL_HLAS = ['HLA-A*02:01', 'HLA-A*24:02', 'HLA-A*03:01']
 NICE_TO_HAVE_HLAS = ['HLA-A*01:01', 'HLA-B*07:02', 'HLA-B*35:01']
 
-# *** NEW: Define Color Mapping ***
-# Using colorblind-friendly Orange and Blue
+# Define Color Mapping 
 COLOR_MAP = {'Mimic': '#E69F00', 'Cancer': '#56B4E9'} 
-# Alternate pair: Teal (#009E73) and Vermillion (#D55E00)
-# COLOR_MAP = {'Mimic': '#009E73', 'Cancer': '#D55E00'} 
-
 
 # --- Helper Functions ---
 
-# @st.cache_data 
+# @st.cache_data # Consider adding back if loading is slow after testing
 def process_uploaded_data(uploaded_file_obj):
     """Loads and preprocesses data from an uploaded file object."""
     try:
@@ -43,7 +39,10 @@ def process_uploaded_data(uploaded_file_obj):
              if col in df.columns and df[col].dtype == 'object':
                  df[col] = pd.to_numeric(df[col], errors='coerce')
         if HLA_COL in df.columns and df[HLA_COL].dtype == 'object':
+            # Clean HLA names: strip whitespace AND handle potential variations like HLA-A:03-01 vs HLA-A*03:01 if necessary
             df[HLA_COL] = df[HLA_COL].str.strip()
+            # Example correction (if needed, adjust based on your actual data):
+            # df[HLA_COL] = df[HLA_COL].str.replace('HLA-A:03-01', 'HLA-A*03:01', regex=False) 
         return df
     except Exception as e:
         st.error(f"Error reading or processing the uploaded CSV file: {e}")
@@ -102,19 +101,26 @@ def generate_plots(df_filtered, selected_metric, color_map):
     # --- Plot 1: Box Plot ---
     if df_melted[HLA_COL].nunique() > 0:
         num_hlas = df_melted[HLA_COL].nunique()
-        plot_height = min(1500, max(400, 35 * num_hlas)) 
+        # Adjust height dynamically, ensure minimum height
+        plot_height = min(2500, max(400, 40 * num_hlas)) # Increased multiplier slightly
         try:
             if use_log_scale: hla_order = df_melted.groupby(HLA_COL)[value_col_name].median().sort_values().index.tolist()
             else: hla_order = sorted(df_melted[HLA_COL].unique())
+            
             fig_box = px.box(
                 df_melted, x=value_col_name, y=HLA_COL, color=source_col_name,
                 title=f"{selected_metric} Distribution per HLA (Mimic vs Cancer)",
                 labels={value_col_name: selected_metric, HLA_COL: "HLA Type", source_col_name: "Source"},
                 orientation='h', log_x=use_log_scale, category_orders={HLA_COL: hla_order}, 
                 height=plot_height, points=False, 
-                color_discrete_map=color_map # *** Apply color map ***
+                color_discrete_map=color_map 
             )
-            fig_box.update_yaxes(categoryorder='array', categoryarray=hla_order, tickfont=dict(size=10))
+            # *** MODIFICATION: Increase y-axis label size ***
+            fig_box.update_yaxes(
+                categoryorder='array', 
+                categoryarray=hla_order, 
+                tickfont=dict(size=12) # Increased size
+            ) 
             fig_box.update_xaxes(title_text=selected_metric)
         except Exception as e: st.error(f"Error generating box plot for {selected_metric}: {e}")
 
@@ -126,7 +132,7 @@ def generate_plots(df_filtered, selected_metric, color_map):
             labels={value_col_name: selected_metric, source_col_name: "Source"},
             marginal="rug", histnorm='percent', barmode='overlay', opacity=0.7,
             log_x=use_log_scale,
-            color_discrete_map=color_map # *** Apply color map ***
+            color_discrete_map=color_map 
         )
         fig_hist.update_layout(xaxis_title=selected_metric, yaxis_title="Percentage")
     except Exception as e: st.error(f"Error generating histogram for {selected_metric}: {e}")
@@ -141,6 +147,10 @@ st.markdown("Explore Affinity (nM) and %Rank EL distributions for selected mimic
 st.header("1. Upload Data")
 uploaded_file = st.file_uploader(
     "Upload your 'final_300_mimics_all_original_data.csv' file:", type=["csv"])
+
+# Initialize session state for HLA selections if it doesn't exist
+if 'hla_selected_states' not in st.session_state:
+    st.session_state.hla_selected_states = {}
 
 # --- Main Processing Logic ---
 if uploaded_file is not None:
@@ -165,35 +175,55 @@ if uploaded_file is not None:
         else:
             filtered_df_mimics = df_original[df_original[MIMIC_PEPTIDE_COL].isin(selected_mimics)]
 
-        # *** NEW: HLA Category Selection ***
+        # *** MODIFIED: HLA Category Selection with Individual Checkboxes ***
         st.sidebar.markdown("---") 
-        st.sidebar.header("HLA Categories")
+        st.sidebar.header("HLA Selection")
         
-        all_available_hlas = filtered_df_mimics[HLA_COL].unique()
+        all_available_hlas_in_filtered_data = sorted(filtered_df_mimics[HLA_COL].unique())
         
-        # Determine which HLAs fall into "Other"
+        # Categorize available HLAs
         critical_set = set(CRITICAL_HLAS)
         nice_to_have_set = set(NICE_TO_HAVE_HLAS)
-        other_hlas = [h for h in all_available_hlas if h not in critical_set and h not in nice_to_have_set]
         
-        # Checkboxes for categories
-        include_critical = st.sidebar.checkbox(f"Critical HLAs ({len(critical_set.intersection(all_available_hlas))} available)", value=True)
-        include_nice = st.sidebar.checkbox(f"Nice-to-have HLAs ({len(nice_to_have_set.intersection(all_available_hlas))} available)", value=True)
-        include_other = st.sidebar.checkbox(f"Other HLAs ({len(other_hlas)} available)", value=True)
-        
-        # Build list of HLAs to include based on selections
-        hlas_to_display = []
-        if include_critical:
-            hlas_to_display.extend([h for h in CRITICAL_HLAS if h in all_available_hlas])
-        if include_nice:
-            hlas_to_display.extend([h for h in NICE_TO_HAVE_HLAS if h in all_available_hlas])
-        if include_other:
-            hlas_to_display.extend(other_hlas)
+        hlas_in_data_critical = sorted([h for h in all_available_hlas_in_filtered_data if h in critical_set])
+        hlas_in_data_nice = sorted([h for h in all_available_hlas_in_filtered_data if h in nice_to_have_set])
+        hlas_in_data_other = sorted([h for h in all_available_hlas_in_filtered_data if h not in critical_set and h not in nice_to_have_set])
+
+        # Function to create expander with checkboxes and select/deselect all
+        def create_hla_expander(title, hla_list, category_key):
+            with st.sidebar.expander(f"{title} ({len(hla_list)} available)", expanded=False):
+                # Select/Deselect All buttons
+                col1, col2 = st.columns(2)
+                select_all_key = f"select_all_{category_key}"
+                deselect_all_key = f"deselect_all_{category_key}"
+                
+                if col1.button("Select All", key=select_all_key, use_container_width=True):
+                    for hla in hla_list:
+                        st.session_state.hla_selected_states[hla] = True
+                if col2.button("Deselect All", key=deselect_all_key, use_container_width=True):
+                     for hla in hla_list:
+                        st.session_state.hla_selected_states[hla] = False
+                        
+                # Individual checkboxes
+                for hla in hla_list:
+                    # Initialize state if not present, default to True
+                    if hla not in st.session_state.hla_selected_states:
+                        st.session_state.hla_selected_states[hla] = True
+                    # Create checkbox, linking its value to session state
+                    st.session_state.hla_selected_states[hla] = st.checkbox(hla, value=st.session_state.hla_selected_states[hla], key=f"chk_{hla}")
+
+        # Create the expanders
+        create_hla_expander("Critical HLAs", hlas_in_data_critical, "critical")
+        create_hla_expander("Nice-to-have HLAs", hlas_in_data_nice, "nice")
+        create_hla_expander("Other HLAs", hlas_in_data_other, "other")
+
+        # Build list of HLAs to display based on session state
+        hlas_to_display = [hla for hla, selected in st.session_state.hla_selected_states.items() if selected and hla in all_available_hlas_in_filtered_data]
             
         # Filter DataFrame based on selected HLAs
-        if not hlas_to_display: # If nothing selected, show nothing
+        if not hlas_to_display: 
              filtered_df_final = pd.DataFrame(columns=filtered_df_mimics.columns) 
-             st.sidebar.warning("No HLA categories selected.")
+             st.sidebar.warning("No HLAs selected.")
         else:
              filtered_df_final = filtered_df_mimics[filtered_df_mimics[HLA_COL].isin(hlas_to_display)]
         
@@ -211,7 +241,7 @@ if uploaded_file is not None:
         st.header("2. Explore Distributions")
 
         if filtered_df_final.empty:
-            st.warning("No data matches the current filter selections (check Mimic and HLA category filters).")
+            st.warning("No data matches the current filter selections (check Mimic and HLA selections).")
         else:
             # --- Affinity Plots ---
             if show_affinity_plots:
@@ -265,3 +295,4 @@ st.sidebar.markdown("""
 6.  **Share:** Share the `.streamlit.app` URL with your colleagues. They will also need to upload the CSV file when they use the app.
 """)
 st.sidebar.markdown("---")
+

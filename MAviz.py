@@ -74,6 +74,142 @@ def process_uploaded_data(uploaded_file_obj):
         st.exception(e)
         return None
 
+def get_presigned_url_for_staged_file(conn, stage_name, remote_file_name, expiration_time_seconds=3600):
+    """
+    Get a pre-signed URL for a file in a Snowflake stage.
+    
+    Args:
+        conn: Snowflake connection object
+        stage_name: Name of the Snowflake stage
+        remote_file_name: Path to the file within the stage
+        expiration_time_seconds: URL expiration time in seconds (default: 1 hour)
+        
+    Returns:
+        str: Pre-signed URL or None on error
+    """
+    cursor = None
+    try:
+        st.info(f"Generating pre-signed URL for {remote_file_name} in {stage_name}...")
+        cursor = conn.cursor()
+        
+        # Construct the query to get the pre-signed URL
+        query = f"""
+        SELECT GET_PRESIGNED_URL(
+            @{stage_name},
+            '{remote_file_name}',
+            {expiration_time_seconds}
+        )
+        """
+        
+        cursor.execute(query)
+        result = cursor.fetchone()
+        
+        if result and result[0]:
+            url = result[0]
+            st.success("Pre-signed URL generated successfully.")
+            return url
+        else:
+            st.error("Failed to generate pre-signed URL. No result returned from Snowflake.")
+            return None
+            
+    except Exception as e:
+        st.error(f"Error generating pre-signed URL: {e}")
+        st.exception(e)
+        return None
+    finally:
+        if cursor:
+            cursor.close()
+
+def generate_csv_on_snowflake_stage_and_get_url(base_query_from_temp_table_template, temp_table_name_in_snowflake, 
+                                               select_columns_sql_str, where_clause_sql_str, sql_params_list, 
+                                               stage_name, remote_csv_filename, conn_details):
+    """
+    Generate a CSV file on a Snowflake stage and get a pre-signed URL for download.
+    
+    Args:
+        base_query_from_temp_table_template: String template for the query (with {columns}, {temp_table_name}, {where_clause} placeholders)
+        temp_table_name_in_snowflake: Name of the temporary table in Snowflake
+        select_columns_sql_str: SQL string for the SELECT columns part
+        where_clause_sql_str: SQL string for the WHERE clause
+        sql_params_list: List of parameters for the WHERE clause
+        stage_name: Name of the Snowflake stage
+        remote_csv_filename: Filename/path for the CSV in the stage (e.g., 'exports/data.csv.gz')
+        conn_details: Dictionary with Snowflake connection parameters
+        
+    Returns:
+        str: Pre-signed URL for the generated CSV file or None on error
+    """
+    conn = None
+    view_name = None
+    try:
+        st.info("Connecting to Snowflake for CSV generation...")
+        
+        # Create a unique temporary view name
+        view_name = f"TEMP_DOWNLOAD_VIEW_{str(uuid.uuid4()).replace('-', '')}"
+        
+        # Construct the query for the view
+        final_query = base_query_from_temp_table_template.format(
+            columns=select_columns_sql_str,
+            temp_table_name=f"\"{conn_details['database']}\".\"{conn_details['schema']}\".\"{temp_table_name_in_snowflake}\"",
+            where_clause=where_clause_sql_str
+        )
+        
+        # Connect to Snowflake
+        conn = snowflake.connector.connect(**conn_details)
+        cs = conn.cursor()
+        
+        # Create the temporary view
+        st.info(f"Creating temporary view {view_name} for CSV export...")
+        create_view_query = f"CREATE TEMPORARY VIEW {view_name} AS {final_query}"
+        cs.execute(create_view_query, sql_params_list)
+        
+        # Generate the CSV using COPY INTO
+        st.info(f"Generating CSV file to {stage_name}/{remote_csv_filename}...")
+        copy_query = f"""
+        COPY INTO @{stage_name}/{remote_csv_filename}
+        FROM {view_name}
+        FILE_FORMAT=(
+            TYPE=CSV, 
+            COMPRESSION='GZIP', 
+            FIELD_OPTIONALLY_ENCLOSED_BY='"', 
+            NULL_IF=('NULL','null',''), 
+            EMPTY_FIELD_AS_NULL=TRUE
+        )
+        OVERWRITE=TRUE 
+        HEADER=TRUE
+        """
+        cs.execute(copy_query)
+        
+        # Drop the temporary view
+        st.info(f"Dropping temporary view {view_name}...")
+        cs.execute(f"DROP VIEW IF EXISTS {view_name}")
+        
+        # Get the pre-signed URL
+        url = get_presigned_url_for_staged_file(conn, stage_name, remote_csv_filename)
+        
+        if url:
+            return url
+        else:
+            st.error("Failed to obtain pre-signed URL after CSV generation.")
+            return None
+            
+    except Exception as e:
+        st.error(f"Error generating CSV on Snowflake stage: {e}")
+        st.exception(e)
+        return None
+    finally:
+        if conn:
+            try:
+                # Ensure we clean up the view if it exists and something went wrong
+                if view_name:
+                    cs = conn.cursor()
+                    cs.execute(f"DROP VIEW IF EXISTS {view_name}")
+                    cs.close()
+            except Exception as e:
+                st.warning(f"Error during cleanup: {e}")
+            
+            conn.close()
+
 # --- Snowflake Processing Function ---
 def process_data_in_snowflake(input_df, filters):
     """
@@ -193,19 +329,17 @@ def process_data_in_snowflake(input_df, filters):
         # but being explicit is safer. Snowflake handles if temp_table_name needs quotes.
         final_query = f'SELECT {select_cols_sql} FROM "{st.secrets["snowflake"]["database"]}"."{st.secrets["snowflake"]["schema"]}"."{temp_table_name}" WHERE {sql_where}'
 
+        # Store query components in session state for later CSV export via Snowflake
+        st.session_state.last_sf_query_components = {
+            "temp_table_name": temp_table_name,  # The name of the temp table write_pandas created
+            "select_columns_sql_str": select_cols_sql,  # The SQL string for selected columns
+            "where_clause_sql_str": sql_where,  # The SQL WHERE clause string
+            "sql_params_list": sql_params_list,  # The list of parameters for the WHERE clause
+            "original_columns": original_columns  # List of original column names
+        }
+        st.session_state.query_template_for_export = 'SELECT {columns} FROM {temp_table_name} WHERE {where_clause}'
 
         st.info("Executing query on Snowflake...")
-        
-        # --- BEGIN DEBUG LOGGING ---
-        st.write("--- DEBUG: Snowflake Query ---")
-        st.write(f"Final Query Template For Execution:\n```sql\n{final_query}\n```")
-        st.write(f"Parameters for pyformat style (length: {len(sql_params_list)}):")
-        st.write(sql_params_list)
-        st.write("Parameter types:")
-        for i, param in enumerate(sql_params_list):
-            st.write(f"Param {i}: {type(param)} - Value: {param}")
-        st.write("--- END DEBUG: Snowflake Query ---")
-        # --- END DEBUG LOGGING ---
 
         cs.execute(final_query, sql_params_list) # Pass list for pyformat
         df_filtered = cs.fetch_pandas_all()
@@ -627,22 +761,97 @@ if uploaded_file is not None:
             st.markdown("---")
             st.header("Export Filtered Data")
             export_filename_base = st.text_input("Enter filename (without extension):", "filtered_peptide_data", key="export_filename")
-            export_format = st.radio("Select export format:", ("CSV (.csv)", "Excel (.xlsx)"), key="export_format_radio")
-            file_extension = ".csv" if export_format == "CSV (.csv)" else ".xlsx"
-            full_export_filename = f"{export_filename_base}{file_extension}"
-            data_to_download = None
-            if export_format == "CSV (.csv)":
-                try: csv_data = filtered_df_final.to_csv(index=False).encode('utf-8'); mime_type = 'text/csv'; data_to_download = csv_data
-                except Exception as e: st.error(f"Error preparing CSV: {e}"); st.exception(e)
-            else: # Excel
-                try:
-                    output_buffer = io.BytesIO()
-                    with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer: filtered_df_final.to_excel(writer, index=False, sheet_name='Filtered Data')
-                    excel_data = output_buffer.getvalue(); mime_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'; data_to_download = excel_data
-                except Exception as e: st.error(f"Error preparing Excel: {e}"); st.exception(e)
-            if data_to_download:
-                st.download_button(label=f"Download {full_export_filename}", data=data_to_download, file_name=full_export_filename, mime=mime_type, key="download_button")
-            else: st.warning("Could not prepare data for download.")
+            
+            # Determine available export options
+            export_options = []
+            can_export_in_app = not filtered_df_final.empty
+            can_export_via_snowflake = 'last_sf_query_components' in st.session_state
+            
+            if can_export_via_snowflake:
+                export_options.append("CSV via Snowflake (Recommended for large datasets)")
+            if can_export_in_app:
+                export_options.extend(["CSV (In-app, for current view)", "Excel (In-app, for current view)"])
+            
+            if not export_options:
+                st.warning("No export options available. Please process data first.")
+            else:
+                export_format = st.radio("Select export format:", export_options, key="export_format_radio")
+                
+                # Handle Snowflake CSV export option
+                if "CSV via Snowflake" in export_format:
+                    staged_file_name = f"exports/{export_filename_base}_{str(uuid.uuid4())[:8]}.csv.gz"
+                    sf_stage_name = st.secrets["snowflake"].get("stage_name", "my_temp_downloads_stage")
+                    
+                    if st.button(f"Prepare Download: {export_filename_base}.csv.gz (from Snowflake)", key="prepare_sf_download"):
+                        with st.spinner("Generating CSV file in Snowflake..."):
+                            if 'last_sf_query_components' in st.session_state and 'query_template_for_export' in st.session_state:
+                                query_components = st.session_state.last_sf_query_components
+                                query_template = st.session_state.query_template_for_export
+                                
+                                try:
+                                    presigned_url = generate_csv_on_snowflake_stage_and_get_url(
+                                        base_query_from_temp_table_template=query_template,
+                                        temp_table_name_in_snowflake=query_components["temp_table_name"],
+                                        select_columns_sql_str=query_components["select_columns_sql_str"],
+                                        where_clause_sql_str=query_components["where_clause_sql_str"],
+                                        sql_params_list=query_components["sql_params_list"],
+                                        stage_name=sf_stage_name, 
+                                        remote_csv_filename=staged_file_name,
+                                        conn_details=st.secrets["snowflake"]
+                                    )
+                                    
+                                    if presigned_url:
+                                        st.success(f"CSV file generated successfully!")
+                                        st.link_button("Download CSV (Link valid for 1 hour)", presigned_url)
+                                        st.info("Note: This link is temporary and will expire after one hour. Please download the file now.")
+                                    else:
+                                        st.error("Failed to generate pre-signed URL.")
+                                except Exception as e:
+                                    st.error(f"Error during Snowflake CSV generation: {e}")
+                                    st.exception(e)
+                            else:
+                                st.error("Cannot find query information for Snowflake export. Please reprocess the data.")
+                
+                # Handle in-app export options
+                elif "CSV (In-app" in export_format:
+                    try:
+                        csv_data = filtered_df_final.to_csv(index=False).encode('utf-8')
+                        mime_type = 'text/csv'
+                        file_name = f"{export_filename_base}.csv"
+                        st.download_button(
+                            label=f"Download {file_name}", 
+                            data=csv_data, 
+                            file_name=file_name, 
+                            mime=mime_type, 
+                            key="download_button_csv"
+                        )
+                    except Exception as e:
+                        st.error(f"Error preparing CSV: {e}")
+                        st.exception(e)
+                
+                elif "Excel (In-app" in export_format:
+                    try:
+                        # Create a safe copy of the DataFrame and handle non-standard indexes
+                        df_for_excel = filtered_df_final.copy()
+                        if not isinstance(df_for_excel.index, pd.RangeIndex):
+                            df_for_excel = df_for_excel.reset_index(drop=True)
+                        
+                        output_buffer = io.BytesIO()
+                        with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
+                            df_for_excel.to_excel(writer, index=False, sheet_name='Filtered Data')
+                        excel_data = output_buffer.getvalue()
+                        mime_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                        file_name = f"{export_filename_base}.xlsx"
+                        st.download_button(
+                            label=f"Download {file_name}", 
+                            data=excel_data, 
+                            file_name=file_name, 
+                            mime=mime_type, 
+                            key="download_button_excel"
+                        )
+                    except Exception as e:
+                        st.error(f"Error preparing Excel: {e}")
+                        st.exception(e)
 
     else: # df_initial_read is None or empty
          if uploaded_file is not None:

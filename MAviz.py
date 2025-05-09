@@ -98,15 +98,15 @@ def process_data_in_snowflake(input_df, filters):
         # These quoted names will be used in the SQL query construction.
         safe_columns_quoted = [f'"{col}"' for col in original_columns]
         df_upload = input_df.copy()
-        df_upload.columns = safe_columns_quoted # Use quoted names for upload to avoid issues if pandas doesn't quote them
+        # df_upload.columns = safe_columns_quoted # Let write_pandas handle column quoting
 
         success, nchunks, nrows, _ = write_pandas(
             conn=conn,
-            df=df_upload,
+            df=df_upload, # df_upload now has original (clean) column names
             table_name=temp_table_name, # Snowflake will handle quoting this table name if needed
             database=st.secrets["snowflake"]["database"],
             schema=st.secrets["snowflake"]["schema"],
-            quote_identifiers=False, # We've already quoted columns in the DataFrame
+            quote_identifiers=True, # Let write_pandas quote all identifiers (table, schema, columns)
             auto_create_table=True,
             table_type='temporary'
         )

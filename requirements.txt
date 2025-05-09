@@ -2,4 +2,6 @@ streamlit
 pandas
 plotly
 numpy
-
+openpyxl
+snowflake-connector-python
+sqlalchemy

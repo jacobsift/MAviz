@@ -89,7 +89,8 @@ def process_data_in_snowflake(input_df, filters):
     try:
         conn = snowflake.connector.connect(**st.secrets["snowflake"])
         cs = conn.cursor()
-
+        cs.paramstyle = 'qmark'  # Explicitly set paramstyle to avoid formatting errors
+        
         st.info(f"Uploading data ({input_df.shape[0]} rows) to temporary Snowflake table...")
 
         original_columns = input_df.columns.tolist()

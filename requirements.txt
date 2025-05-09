@@ -5,3 +5,4 @@ numpy
 openpyxl
 snowflake-connector-python
 sqlalchemy
+pyarrow<19.0.0

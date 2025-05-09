@@ -244,7 +244,7 @@ def process_data_in_snowflake(input_df, filters):
             schema=st.secrets["snowflake"]["schema"],
             quote_identifiers=True, # Let write_pandas quote all identifiers (table, schema, columns)
             auto_create_table=True,
-            table_type='temporary'
+            table_type='transient'
         )
 
         if not success:

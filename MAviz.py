@@ -33,7 +33,6 @@ COLOR_MAP = {'Mimic': '#E69F00', 'Cancer': '#56B4E9'}
 @st.cache_data # Caching enabled for initial data loading and preprocessing
 def process_uploaded_data(uploaded_file_obj):
     """Loads and preprocesses data from an uploaded file object."""
-    # input_bytes = uploaded_file_obj.getvalue() # Read bytes for caching if needed, but name/size might be enough for cache invalidation
     try:
         st.info(f"Reading uploaded file '{uploaded_file_obj.name}'...")
         df = pd.read_csv(uploaded_file_obj)
@@ -58,7 +57,6 @@ def process_uploaded_data(uploaded_file_obj):
         string_cols = [MIMIC_PEPTIDE_COL, CANCER_PEPTIDE_COL, CANCER_ACC_COL, HLA_COL]
         for col in string_cols:
             if col in df.columns and df[col].dtype == 'object':
-                # Apply strip only if it's actually a string type after potential conversions
                 if pd.api.types.is_string_dtype(df[col]):
                      df[col] = df[col].str.strip()
 
@@ -72,7 +70,7 @@ def process_uploaded_data(uploaded_file_obj):
 # --- Snowflake Processing Function ---
 def process_data_in_snowflake(input_df, filters):
     """
-    Uploads a DataFrame to a temporary Snowflake table, applies filters via SQL,
+    Uploads a DataFrame to a temporary Snowflake table, applies filters via SQL (using qmark style),
     and returns the resulting DataFrame.
     """
     if input_df.empty:
@@ -88,17 +86,19 @@ def process_data_in_snowflake(input_df, filters):
         st.info(f"Uploading data ({input_df.shape[0]} rows) to temporary Snowflake table...")
 
         original_columns = input_df.columns.tolist()
-        safe_columns = [f'"{col}"' for col in original_columns] # Quote all for safety
+        # Quote column names for safety, especially those with special characters like %
+        # These quoted names will be used in the SQL query construction.
+        safe_columns_quoted = [f'"{col}"' for col in original_columns]
         df_upload = input_df.copy()
-        df_upload.columns = safe_columns
+        df_upload.columns = safe_columns_quoted # Use quoted names for upload to avoid issues if pandas doesn't quote them
 
         success, nchunks, nrows, _ = write_pandas(
             conn=conn,
             df=df_upload,
-            table_name=temp_table_name,
+            table_name=temp_table_name, # Snowflake will handle quoting this table name if needed
             database=st.secrets["snowflake"]["database"],
             schema=st.secrets["snowflake"]["schema"],
-            quote_identifiers=False,
+            quote_identifiers=False, # We've already quoted columns in the DataFrame
             auto_create_table=True,
             table_type='temporary'
         )
@@ -109,76 +109,91 @@ def process_data_in_snowflake(input_df, filters):
 
         st.info(f"Data uploaded. Building and executing filter query...")
 
-        # --- Build SQL WHERE Clause ---
+        # --- Build SQL WHERE Clause using qmark (?) style ---
         where_clauses = []
-        sql_params = {} # Use parameters dictionary
+        sql_params_list = [] # Parameters will be a list for qmark style
 
         # Binding Thresholds
         if filters.get('enable_affinity_filter'):
             max_aff = filters.get('max_affinity', 500.0)
-            if f'"{MIMIC_AFF_COL}"' in df_upload.columns:
-                 where_clauses.append(f'("{MIMIC_AFF_COL}" <= %(max_aff)s OR "{MIMIC_AFF_COL}" IS NULL)')
-            if f'"{CANCER_AFF_COL}"' in df_upload.columns:
-                 where_clauses.append(f'("{CANCER_AFF_COL}" <= %(max_aff)s OR "{CANCER_AFF_COL}" IS NULL)')
-            sql_params['max_aff'] = max_aff
+            mimic_aff_col_quoted = f'"{MIMIC_AFF_COL}"'
+            cancer_aff_col_quoted = f'"{CANCER_AFF_COL}"'
+
+            if mimic_aff_col_quoted in df_upload.columns:
+                 where_clauses.append(f'({mimic_aff_col_quoted} <= ? OR {mimic_aff_col_quoted} IS NULL)')
+                 sql_params_list.append(max_aff)
+            if cancer_aff_col_quoted in df_upload.columns: # Separate condition if both present
+                 where_clauses.append(f'({cancer_aff_col_quoted} <= ? OR {cancer_aff_col_quoted} IS NULL)')
+                 sql_params_list.append(max_aff)
+
 
         if filters.get('enable_el_rank_filter'):
             max_el = filters.get('max_el_rank', 2.0)
-            if f'"{MIMIC_EL_COL}"' in df_upload.columns:
-                 where_clauses.append(f'("{MIMIC_EL_COL}" <= %(max_el)s OR "{MIMIC_EL_COL}" IS NULL)')
-            if f'"{CANCER_EL_COL}"' in df_upload.columns:
-                 where_clauses.append(f'("{CANCER_EL_COL}" <= %(max_el)s OR "{CANCER_EL_COL}" IS NULL)')
-            sql_params['max_el'] = max_el
+            mimic_el_col_quoted = f'"{MIMIC_EL_COL}"'
+            cancer_el_col_quoted = f'"{CANCER_EL_COL}"'
+
+            if mimic_el_col_quoted in df_upload.columns:
+                 where_clauses.append(f'({mimic_el_col_quoted} <= ? OR {mimic_el_col_quoted} IS NULL)')
+                 sql_params_list.append(max_el)
+            if cancer_el_col_quoted in df_upload.columns:
+                 where_clauses.append(f'({cancer_el_col_quoted} <= ? OR {cancer_el_col_quoted} IS NULL)')
+                 sql_params_list.append(max_el)
+
 
         # Select Mimic Peptide(s)
         selected_mimics = filters.get('selected_mimics', ['All'])
+        mimic_peptide_col_quoted = f'"{MIMIC_PEPTIDE_COL}"'
         if selected_mimics and 'All' not in selected_mimics:
-            param_name = "mimic_list"
-            where_clauses.append(f'"{MIMIC_PEPTIDE_COL}" IN %({param_name})s')
-            sql_params[param_name] = tuple(selected_mimics)
+            # For IN clauses with qmark, we need one '?' per item.
+            placeholders = ', '.join(['?'] * len(selected_mimics))
+            where_clauses.append(f'{mimic_peptide_col_quoted} IN ({placeholders})')
+            sql_params_list.extend(selected_mimics)
 
         # Select Cancer Peptide(s)
         selected_cancer_peptides = filters.get('selected_cancer_peptides', ['All'])
+        cancer_peptide_col_quoted = f'"{CANCER_PEPTIDE_COL}"'
         if selected_cancer_peptides and 'All' not in selected_cancer_peptides:
-            param_name = "cancer_peptide_list"
-            if f'"{CANCER_PEPTIDE_COL}"' in df_upload.columns:
-                where_clauses.append(f'"{CANCER_PEPTIDE_COL}" IN %({param_name})s')
-                sql_params[param_name] = tuple(selected_cancer_peptides)
+            if cancer_peptide_col_quoted in df_upload.columns:
+                placeholders = ', '.join(['?'] * len(selected_cancer_peptides))
+                where_clauses.append(f'{cancer_peptide_col_quoted} IN ({placeholders})')
+                sql_params_list.extend(selected_cancer_peptides)
 
         # Select Cancer Accession(s)
         selected_cancer_accs = filters.get('selected_cancer_accs', [])
+        cancer_acc_col_quoted = f'"{CANCER_ACC_COL}"'
         if selected_cancer_accs:
-            param_name = "cancer_acc_list"
-            if f'"{CANCER_ACC_COL}"' in df_upload.columns:
-                where_clauses.append(f'"{CANCER_ACC_COL}" IN %({param_name})s')
-                sql_params[param_name] = tuple(selected_cancer_accs)
+            if cancer_acc_col_quoted in df_upload.columns:
+                placeholders = ', '.join(['?'] * len(selected_cancer_accs))
+                where_clauses.append(f'{cancer_acc_col_quoted} IN ({placeholders})')
+                sql_params_list.extend(selected_cancer_accs)
 
         # Select HLA(s) for Visualization
         selected_hlas_viz = filters.get('selected_hlas_viz', [])
+        hla_col_quoted = f'"{HLA_COL}"'
         if selected_hlas_viz:
-            param_name = "hla_viz_list"
-            if f'"{HLA_COL}"' in df_upload.columns:
-                where_clauses.append(f'"{HLA_COL}" IN %({param_name})s')
-                sql_params[param_name] = tuple(selected_hlas_viz)
+            if hla_col_quoted in df_upload.columns:
+                placeholders = ', '.join(['?'] * len(selected_hlas_viz))
+                where_clauses.append(f'{hla_col_quoted} IN ({placeholders})')
+                sql_params_list.extend(selected_hlas_viz)
 
         # Combine WHERE clauses
         sql_where = " AND ".join(where_clauses) if where_clauses else "1=1"
 
-        # Construct the raw query string with placeholders
-        select_cols_sql = ", ".join(safe_columns)
-        final_query_template = f'SELECT {select_cols_sql} FROM "{st.secrets["snowflake"]["database"]}"."{st.secrets["snowflake"]["schema"]}"."{temp_table_name}" WHERE {sql_where}'
+        # Final Query - Column names in SELECT list should be quoted
+        select_cols_sql = ", ".join(safe_columns_quoted)
+        # Table name in FROM clause is an identifier, usually doesn't need explicit schema if default is set,
+        # but being explicit is safer. Snowflake handles if temp_table_name needs quotes.
+        final_query = f'SELECT {select_cols_sql} FROM "{st.secrets["snowflake"]["database"]}"."{st.secrets["snowflake"]["schema"]}"."{temp_table_name}" WHERE {sql_where}'
 
-        # Escape literal '%' signs for Python % formatting used by the connector
-        final_query_escaped = final_query_template.replace('%', '%%')
 
         st.info("Executing query on Snowflake...")
-        # st.write(f"Escaped Query Template:\n```sql\n{final_query_escaped}\n```") # Debug
-        # st.write(f"Parameters: {sql_params}") # Debug
+        # st.write(f"Query Template:\n```sql\n{final_query}\n```") # Debug
+        # st.write(f"Parameters: {sql_params_list}") # Debug
 
-        cs.execute(final_query_escaped, sql_params)
+        cs.execute(final_query, sql_params_list) # Pass list for qmark
         df_filtered = cs.fetch_pandas_all()
 
-        # Rename columns back to original names
+        # Rename columns back to original names (without quotes)
         df_filtered.columns = original_columns
 
         st.success(f"Filtered data received from Snowflake! Shape: {df_filtered.shape}")
@@ -187,10 +202,10 @@ def process_data_in_snowflake(input_df, filters):
     except snowflake.connector.errors.ProgrammingError as pe:
          st.error(f"Snowflake Programming Error (check SQL syntax, permissions, identifiers): {pe}")
          st.exception(pe)
-         if "bind variable" in str(pe): st.error("Check parameter binding.")
+         if "bind variable" in str(pe).lower(): st.error("This might be related to parameter binding. Check parameter count and types.")
          return pd.DataFrame()
-    except ValueError as ve:
-         st.error(f"ValueError during SQL processing (likely parameter formatting): {ve}")
+    except ValueError as ve: # Catch other ValueErrors that might occur
+         st.error(f"ValueError during SQL processing: {ve}")
          st.exception(ve)
          return pd.DataFrame()
     except Exception as e:
@@ -464,8 +479,7 @@ if uploaded_file is not None:
                 if col2_acc.button("Deselect All", key="btn_deselect_all_cancer_acc", use_container_width=True): [st.session_state.update({f"chk_acc_{acc}": False}) for acc in available_cancer_accs]
                 for acc in available_cancer_accs:
                     is_selected = st.checkbox(acc, value=st.session_state.get(f"chk_acc_{acc}", True), key=f"chk_acc_{acc}")
-                    # **** REMOVED REDUNDANT SESSION STATE ASSIGNMENT ****
-                    # st.session_state[f"chk_acc_{acc}"] = is_selected
+                    # The widget itself updates session_state, no need to assign back 'is_selected' to session_state here
                     if is_selected: cancer_accs_to_display.append(acc)
 
         # HLA Selection for Visualization UI
@@ -504,8 +518,7 @@ if uploaded_file is not None:
                     if col2.button("Deselect All", key=f"btn_deselect_all_hla_{category_key_suffix}", use_container_width=True): [st.session_state.update({f"chk_hla_{hla}": False}) for hla in hla_list_for_category]
                     for hla in hla_list_for_category:
                         is_selected_hla = st.checkbox(hla, value=st.session_state.get(f"chk_hla_{hla}", True), key=f"chk_hla_{hla}")
-                        # **** REMOVED REDUNDANT SESSION STATE ASSIGNMENT ****
-                        # st.session_state[f"chk_hla_{hla}"] = is_selected_hla
+                        # The widget itself updates session_state, no need to assign back 'is_selected_hla' to session_state here
                         if is_selected_hla: hlas_to_display_for_viz.append(hla)
 
             create_hla_expander("Critical HLAs", hlas_in_data_critical, "critical")

@@ -77,7 +77,7 @@ def process_uploaded_data(uploaded_file_obj):
 # --- Snowflake Processing Function ---
 def process_data_in_snowflake(input_df, filters):
     """
-    Uploads a DataFrame to a temporary Snowflake table, applies filters via SQL (using qmark style),
+    Uploads a DataFrame to a temporary Snowflake table, applies filters via SQL (using pyformat style),
     and returns the resulting DataFrame.
     """
     if input_df.empty:
@@ -89,7 +89,7 @@ def process_data_in_snowflake(input_df, filters):
     try:
         conn = snowflake.connector.connect(**st.secrets["snowflake"])
         cs = conn.cursor()
-        cs.paramstyle = 'qmark'  # Explicitly set paramstyle to avoid formatting errors
+        # We'll use pyformat style (with %s placeholders), which the connector defaults to
         
         st.info(f"Uploading data ({input_df.shape[0]} rows) to temporary Snowflake table...")
 
@@ -117,9 +117,9 @@ def process_data_in_snowflake(input_df, filters):
 
         st.info(f"Data uploaded. Building and executing filter query...")
 
-        # --- Build SQL WHERE Clause using qmark (?) style ---
+        # --- Build SQL WHERE Clause using pyformat (%s) style ---
         where_clauses = []
-        sql_params_list = [] # Parameters will be a list for qmark style
+        sql_params_list = [] # Parameters will be a list for pyformat style
 
         # Binding Thresholds
         if filters.get('enable_affinity_filter'):
@@ -128,10 +128,10 @@ def process_data_in_snowflake(input_df, filters):
             cancer_aff_col_quoted = f'"{CANCER_AFF_COL}"'
 
             if mimic_aff_col_quoted in df_upload.columns:
-                 where_clauses.append(f'({mimic_aff_col_quoted} <= ? OR {mimic_aff_col_quoted} IS NULL)')
+                 where_clauses.append(f'({mimic_aff_col_quoted} <= %s OR {mimic_aff_col_quoted} IS NULL)')
                  sql_params_list.append(max_aff)
             if cancer_aff_col_quoted in df_upload.columns: # Separate condition if both present
-                 where_clauses.append(f'({cancer_aff_col_quoted} <= ? OR {cancer_aff_col_quoted} IS NULL)')
+                 where_clauses.append(f'({cancer_aff_col_quoted} <= %s OR {cancer_aff_col_quoted} IS NULL)')
                  sql_params_list.append(max_aff)
 
 
@@ -141,10 +141,10 @@ def process_data_in_snowflake(input_df, filters):
             cancer_el_col_quoted = f'"{CANCER_EL_COL}"'
 
             if mimic_el_col_quoted in df_upload.columns:
-                 where_clauses.append(f'({mimic_el_col_quoted} <= ? OR {mimic_el_col_quoted} IS NULL)')
+                 where_clauses.append(f'({mimic_el_col_quoted} <= %s OR {mimic_el_col_quoted} IS NULL)')
                  sql_params_list.append(max_el)
             if cancer_el_col_quoted in df_upload.columns:
-                 where_clauses.append(f'({cancer_el_col_quoted} <= ? OR {cancer_el_col_quoted} IS NULL)')
+                 where_clauses.append(f'({cancer_el_col_quoted} <= %s OR {cancer_el_col_quoted} IS NULL)')
                  sql_params_list.append(max_el)
 
 
@@ -152,8 +152,8 @@ def process_data_in_snowflake(input_df, filters):
         selected_mimics = filters.get('selected_mimics', ['All'])
         mimic_peptide_col_quoted = f'"{MIMIC_PEPTIDE_COL}"'
         if selected_mimics and 'All' not in selected_mimics:
-            # For IN clauses with qmark, we need one '?' per item.
-            placeholders = ', '.join(['?'] * len(selected_mimics))
+            # For IN clauses with pyformat, we need one '%s' per item.
+            placeholders = ', '.join(['%s'] * len(selected_mimics))
             where_clauses.append(f'{mimic_peptide_col_quoted} IN ({placeholders})')
             sql_params_list.extend(selected_mimics)
 
@@ -162,7 +162,7 @@ def process_data_in_snowflake(input_df, filters):
         cancer_peptide_col_quoted = f'"{CANCER_PEPTIDE_COL}"'
         if selected_cancer_peptides and 'All' not in selected_cancer_peptides:
             if cancer_peptide_col_quoted in df_upload.columns:
-                placeholders = ', '.join(['?'] * len(selected_cancer_peptides))
+                placeholders = ', '.join(['%s'] * len(selected_cancer_peptides))
                 where_clauses.append(f'{cancer_peptide_col_quoted} IN ({placeholders})')
                 sql_params_list.extend(selected_cancer_peptides)
 
@@ -171,7 +171,7 @@ def process_data_in_snowflake(input_df, filters):
         cancer_acc_col_quoted = f'"{CANCER_ACC_COL}"'
         if selected_cancer_accs:
             if cancer_acc_col_quoted in df_upload.columns:
-                placeholders = ', '.join(['?'] * len(selected_cancer_accs))
+                placeholders = ', '.join(['%s'] * len(selected_cancer_accs))
                 where_clauses.append(f'{cancer_acc_col_quoted} IN ({placeholders})')
                 sql_params_list.extend(selected_cancer_accs)
 
@@ -180,7 +180,7 @@ def process_data_in_snowflake(input_df, filters):
         hla_col_quoted = f'"{HLA_COL}"'
         if selected_hlas_viz:
             if hla_col_quoted in df_upload.columns:
-                placeholders = ', '.join(['?'] * len(selected_hlas_viz))
+                placeholders = ', '.join(['%s'] * len(selected_hlas_viz))
                 where_clauses.append(f'{hla_col_quoted} IN ({placeholders})')
                 sql_params_list.extend(selected_hlas_viz)
 
@@ -199,7 +199,7 @@ def process_data_in_snowflake(input_df, filters):
         # --- BEGIN DEBUG LOGGING ---
         st.write("--- DEBUG: Snowflake Query ---")
         st.write(f"Final Query Template For Execution:\n```sql\n{final_query}\n```")
-        st.write(f"Parameters for qmark style (length: {len(sql_params_list)}):")
+        st.write(f"Parameters for pyformat style (length: {len(sql_params_list)}):")
         st.write(sql_params_list)
         st.write("Parameter types:")
         for i, param in enumerate(sql_params_list):
@@ -207,7 +207,7 @@ def process_data_in_snowflake(input_df, filters):
         st.write("--- END DEBUG: Snowflake Query ---")
         # --- END DEBUG LOGGING ---
 
-        cs.execute(final_query, sql_params_list) # Pass list for qmark
+        cs.execute(final_query, sql_params_list) # Pass list for pyformat
         df_filtered = cs.fetch_pandas_all()
 
         # Rename columns back to original names (without quotes)

@@ -195,8 +195,17 @@ def process_data_in_snowflake(input_df, filters):
 
 
         st.info("Executing query on Snowflake...")
-        # st.write(f"Query Template:\n```sql\n{final_query}\n```") # Debug
-        # st.write(f"Parameters: {sql_params_list}") # Debug
+        
+        # --- BEGIN DEBUG LOGGING ---
+        st.write("--- DEBUG: Snowflake Query ---")
+        st.write(f"Final Query Template For Execution:\n```sql\n{final_query}\n```")
+        st.write(f"Parameters for qmark style (length: {len(sql_params_list)}):")
+        st.write(sql_params_list)
+        st.write("Parameter types:")
+        for i, param in enumerate(sql_params_list):
+            st.write(f"Param {i}: {type(param)} - Value: {param}")
+        st.write("--- END DEBUG: Snowflake Query ---")
+        # --- END DEBUG LOGGING ---
 
         cs.execute(final_query, sql_params_list) # Pass list for qmark
         df_filtered = cs.fetch_pandas_all()

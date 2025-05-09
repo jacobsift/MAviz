@@ -20,8 +20,8 @@ CANCER_ACC_COL = 'cancer_acc'
 HLA_COL = 'MHC'
 MIMIC_AFF_COL = 'mimic_Aff(nM)'
 CANCER_AFF_COL = 'cancer_Aff(nM)'
-MIMIC_EL_COL = 'mimic_%Rank_EL'
-CANCER_EL_COL = 'cancer_%Rank_EL'
+MIMIC_EL_COL = 'mimic_Rank_EL'  # Was 'mimic_%Rank_EL', removed '%' to avoid SQL formatting issues
+CANCER_EL_COL = 'cancer_Rank_EL'  # Was 'cancer_%Rank_EL', removed '%' to avoid SQL formatting issues
 
 CRITICAL_HLAS = ['HLA-A*02:01', 'HLA-A*24:02', 'HLA-A*03:01']
 NICE_TO_HAVE_HLAS = ['HLA-A*01:01', 'HLA-B*07:02', 'HLA-B*35:01']
@@ -37,7 +37,14 @@ def process_uploaded_data(uploaded_file_obj):
         st.info(f"Reading uploaded file '{uploaded_file_obj.name}'...")
         df = pd.read_csv(uploaded_file_obj)
         st.success(f"Successfully read file! Shape: {df.shape}. Preprocessing...")
-
+        
+        # Remove '%' characters from column names to avoid SQL formatting issues
+        original_cols = df.columns.tolist()
+        df.columns = [col.replace('%', '') for col in df.columns]
+        renamed_cols = {orig: new for orig, new in zip(original_cols, df.columns) if orig != new}
+        if renamed_cols:
+            st.info(f"Renamed columns to avoid SQL formatting issues: {renamed_cols}")
+            
         required_cols = [MIMIC_PEPTIDE_COL, HLA_COL]
         missing_required = [col for col in required_cols if col not in df.columns]
         if missing_required:

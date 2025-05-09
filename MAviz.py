@@ -313,7 +313,6 @@ st.title("🧬 Mimic Peptide Binding Explorer (Snowflake Backend)")
 st.markdown("Explore Affinity (nM) and %Rank EL distributions using Snowflake for processing.")
 
 # --- File Uploader ---
-# **** MOVED FILE UPLOADER HERE ****
 st.header("Upload Data")
 uploaded_file = st.file_uploader(
     "Upload your CSV data file...", type=["csv"], key="file_uploader")
@@ -323,7 +322,6 @@ if 'hla_selected_states' not in st.session_state: st.session_state.hla_selected_
 if 'cancer_acc_selected_states' not in st.session_state: st.session_state.cancer_acc_selected_states = {}
 
 # --- Main Processing Logic ---
-# **** MOVED MAIN LOGIC AFTER FILE UPLOADER ****
 if uploaded_file is not None:
     df_initial_read = process_uploaded_data(uploaded_file)
 
@@ -461,12 +459,15 @@ if uploaded_file is not None:
         if not available_cancer_accs: st.sidebar.info("No Cancer Accessions available.")
         else:
             with st.sidebar.expander(f"Select Cancer Accessions ({len(available_cancer_accs)} available)", expanded=False):
-                # ... (Checkbox logic remains the same) ...
                 col1_acc, col2_acc = st.columns(2)
+                # Use list comprehensions for button actions for conciseness
                 if col1_acc.button("Select All", key="btn_select_all_cancer_acc", use_container_width=True): [st.session_state.update({f"chk_acc_{acc}": True}) for acc in available_cancer_accs]
                 if col2_acc.button("Deselect All", key="btn_deselect_all_cancer_acc", use_container_width=True): [st.session_state.update({f"chk_acc_{acc}": False}) for acc in available_cancer_accs]
                 for acc in available_cancer_accs:
+                    # Use st.session_state.get to provide default value if key doesn't exist yet
                     is_selected = st.checkbox(acc, value=st.session_state.get(f"chk_acc_{acc}", True), key=f"chk_acc_{acc}")
+                    # Update session state directly is fine here
+                    st.session_state[f"chk_acc_{acc}"] = is_selected
                     if is_selected: cancer_accs_to_display.append(acc)
 
         # HLA Selection for Visualization UI
@@ -479,26 +480,48 @@ if uploaded_file is not None:
         if not all_available_hlas_in_filtered_data: st.sidebar.info("No HLAs available for visualization selection.")
         else:
             current_hla_set = set(all_available_hlas_in_filtered_data)
+            # Clean up stale session state keys
             for hla_key in list(st.session_state.hla_selected_states.keys()):
                 if hla_key not in current_hla_set: del st.session_state.hla_selected_states[hla_key]
+
             hlas_in_data_critical = sorted([h for h in all_available_hlas_in_filtered_data if h in CRITICAL_HLAS])
             hlas_in_data_nice = sorted([h for h in all_available_hlas_in_filtered_data if h in NICE_TO_HAVE_HLAS])
             hlas_in_data_other = sorted([h for h in all_available_hlas_in_filtered_data if h not in CRITICAL_HLAS and h not in NICE_TO_HAVE_HLAS])
+
+            # Define create_hla_expander function locally within the scope where it's used
             def create_hla_expander(title, hla_list_for_category, category_key_suffix):
-                # ... (Function definition remains the same) ...
-                if not hla_list_for_category: st.sidebar.markdown(f"_{title} (0 available)_"); return
-                # ... (Rest of expander logic) ...
+                if not hla_list_for_category:
+                    st.sidebar.markdown(f"_{title} (0 available)_")
+                    return
+
+                # **** FIXED: Added back default_expanded calculation ****
+                is_critical_category = (title == "Critical HLAs")
+                has_critical_hlas = bool(hlas_in_data_critical)
+                is_only_this_category_with_hlas = \
+                    (is_critical_category and has_critical_hlas and not bool(hlas_in_data_nice) and not bool(hlas_in_data_other)) or \
+                    (title == "Nice-to-have HLAs" and bool(hlas_in_data_nice) and not has_critical_hlas and not bool(hlas_in_data_other)) or \
+                    (title == "Other HLAs" and bool(hlas_in_data_other) and not has_critical_hlas and not bool(hlas_in_data_nice))
+                default_expanded = (is_critical_category and has_critical_hlas) or is_only_this_category_with_hlas
+                # **** END FIX ****
+
                 with st.sidebar.expander(f"{title} ({len(hla_list_for_category)} available)", expanded=default_expanded):
                     col1, col2 = st.columns(2)
+                    # Use list comprehensions for button actions
                     if col1.button("Select All", key=f"btn_select_all_hla_{category_key_suffix}", use_container_width=True): [st.session_state.update({f"chk_hla_{hla}": True}) for hla in hla_list_for_category]
                     if col2.button("Deselect All", key=f"btn_deselect_all_hla_{category_key_suffix}", use_container_width=True): [st.session_state.update({f"chk_hla_{hla}": False}) for hla in hla_list_for_category]
                     for hla in hla_list_for_category:
+                        # Use st.session_state.get for default value
                         is_selected_hla = st.checkbox(hla, value=st.session_state.get(f"chk_hla_{hla}", True), key=f"chk_hla_{hla}")
-                        if is_selected_hla: hlas_to_display_for_viz.append(hla)
+                        # Update session state
+                        st.session_state[f"chk_hla_{hla}"] = is_selected_hla
+                        # Append directly to the list defined in the outer scope
+                        if is_selected_hla: hlas_to_display_for_viz.append(hla) # Appends to the list in the outer scope
 
+            # Call the locally defined function
             create_hla_expander("Critical HLAs", hlas_in_data_critical, "critical")
             create_hla_expander("Nice-to-have HLAs", hlas_in_data_nice, "nice")
             create_hla_expander("Other HLAs", hlas_in_data_other, "other")
+            # No need to recalculate hlas_to_display_for_viz here, it's populated by the function calls
 
         # --- Collect filters for Snowflake function ---
         snowflake_filters = {
@@ -507,7 +530,7 @@ if uploaded_file is not None:
             'selected_mimics': selected_mimics_list,
             'selected_cancer_peptides': selected_cancer_peptides,
             'selected_cancer_accs': cancer_accs_to_display,
-            'selected_hlas_viz': hlas_to_display_for_viz
+            'selected_hlas_viz': hlas_to_display_for_viz # Use the list populated by the expander function
         }
 
         # --- Step 2: Call Snowflake Processing ---
@@ -610,4 +633,3 @@ else:
     st.info("👋 Welcome! Please upload your CSV data file to begin exploring peptide binding.")
 
 st.sidebar.markdown("---")
-
